@@ -153,3 +153,85 @@ finding that a promising strategy was a 1-in-10 draw from an 11,000-variant
 search. Test 4 is the case where this mattered: it produced an encouraging
 number that did not survive replication, and would have been reported as a
 result under a less disciplined process.
+## Opponent-adjusted ratings
+
+Raw xG differential over a rolling window treats a result against the
+leaders and one against the bottom club as identical. This model estimates
+attack and defence for every team simultaneously, so each rating is fitted
+in the context of who that team actually played.
+
+```
+log(xG_for) = mu + home·is_home + attack[team] + defence[opponent]
+```
+
+Ridge-penalised, with exponential time decay (60-day half-life). The
+penalty matters: with five or six matches played, unpenalised attack and
+defence estimates swing wildly, and shrinkage pulls a thin-sample team
+toward league average instead. Ratings reset every season — squad turnover
+at this level makes carryover meaningless — and are published only once a
+team reaches five matches.
+
+Fitting is walk-forward: the rating attached to a fixture uses only matches
+played before it. Estimated home advantage is 1.22x.
+
+### Does the adjustment change anything?
+
+Compared against raw 10-match xG differential on the same fixtures, using
+the same xG input for both:
+
+| | agreement |
+|---|---|
+| rank correlation (Spearman) | 0.891 |
+| same team favoured | 85.1% |
+| shared selections, top 30% by gap | 80.3% |
+| shared selections, top 20% by gap | 77.0% |
+| shared selections, top 10% by gap | 69.4% |
+| **shared selections, top 5% by gap** | **53.3%** |
+
+The two metrics broadly agree on routine fixtures and diverge precisely
+where the gap is largest — the matches you would look at hardest. At the
+top 5%, they disagree about which fixture is the biggest mismatch roughly
+half the time.
+
+So the adjustment is not cosmetic. As an illustration from the live table,
+Hereford sit 11th on raw xG differential and 5th adjusted, because their
+flat raw numbers came against harder opposition than the leaders' better
+ones.
+
+**Which metric is more accurate is not settled here.** That requires
+predicting results out of sample with more power than the 315 matches
+carrying both metrics can provide. The matched-percentile return
+comparison in `compare_metrics.py` reduces to six bets per cell at the
+sharper thresholds, where standard errors run 25–30pp — it is reported for
+completeness and reads as noise. Revisit once 2026/27 completes and a third
+full season is available.
+
+### Test 6: rating-gap thresholds
+
+Backing the better-rated side at gap thresholds of 0.5 / 0.75 / 1.0 / 1.25 /
+1.5, across home, away and both:
+
+| threshold | all seasons | 24/25 | 25/26 |
+|---|---|---|---|
+| 0.50 | −1.25% (321) | +6.62% | −12.08% |
+| 0.75 | −1.94% (136) | +2.45% | −3.46% |
+| 1.00 | −1.57% (48) | −2.66% | +24.78% |
+| 1.25 | −32.50% (15) | −19.68% | −35.50% |
+| 1.50 | −59.74% (6) | −39.61% | n/a |
+
+Null, and informatively so: returns get **worse** as the rating gap widens.
+The hypothesis predicts the opposite — the largest mismatches should carry
+the strongest signal. Instead the extremes are where the losses concentrate.
+Sample sizes at the top two thresholds are too small to read on their own,
+but nothing in the pattern points toward a hidden edge.
+
+This is the sixth independent specification tested against the closing line,
+and the sixth null.
+
+### Files
+
+| file | purpose |
+|---|---|
+| `ratings.py` | the ratings model; `--history` writes the walk-forward series |
+| `rating_strategy.py` | test 6, the threshold sweep |
+| `compare_metrics.py` | adjusted vs raw, agreement and returns |

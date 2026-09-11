@@ -110,6 +110,7 @@ if nxt:
     nf = pd.DataFrame(out)
     nf["gap5"] = (nf.H_xGD5 - nf.A_xGD5).round(2)
     nf["gap10"] = (nf.H_xGD10 - nf.A_xGD10).round(2)
+    nf = nf.reindex(nf.gap10.abs().sort_values(ascending=False).index)
     print(nf.to_string(index=False))
 
 if "--csv" in sys.argv:
