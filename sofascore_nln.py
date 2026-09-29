@@ -1,18 +1,23 @@
 """
-Sofascore -> National League North match xG (and optional shot-level xG).
+Sofascore -> National League North match xG and shot-level data.
 
-Tournament id 176 = National League North (Sofascore files it under
-"england-amateur": /football/tournament/england-amateur/national-league-north/176).
+Tournament id 176 = National League North (filed under "england-amateur").
 
-Run `python sofascore_nln.py check` FIRST. It samples ~15 finished matches and
-reports what fraction actually carry an `expectedGoals` stat and a populated
-shotmap. If that comes back near zero, stop — Sofascore does not collect
-shot-location data at this level and there is nothing to backfill.
+IMPERSONATION NOTE (Sep 2026): Sofascore cross-checks the User-Agent against
+the TLS handshake. curl_cffi 0.13.0's newest Chrome fingerprint is chrome136,
+which is now too old and gets 403 on every request. Safari targets still pass.
+Do NOT set a User-Agent header by hand — curl_cffi supplies one that matches
+its handshake, and a mismatch is an obvious bot signature (a Chrome UA on a
+Safari handshake gets 403 even though the same request without it succeeds).
 
-Then `python sofascore_nln.py backfill` to pull all seasons.
+If safari260 starts failing, safari184, safari180 and safari_ios also worked.
 
-Everything is cached to ./cache as raw JSON, so re-runs cost nothing and a
-rate-limit hit loses at most one request.
+    python sofascore_nln.py check [season_index]   # coverage check
+    python sofascore_nln.py backfill               # match xG + team stats
+    python sofascore_nln.py shots                  # shot-level data
+
+Everything is cached to ./cache as raw JSON, so re-runs cost nothing and an
+interrupted run loses at most one request.
 """
 
 import json
@@ -21,26 +26,33 @@ import random
 import sys
 import time
 from pathlib import Path
+
 from curl_cffi.requests import Session as CurlSession
 
-
 TOURNAMENT_ID = 176          # National League North
-BASE = "https://www.sofascore.com/api/v1"   # api.sofascore.com now 403s
+BASE = "https://www.sofascore.com/api/v1"   # api.sofascore.com 403s
 CACHE = Path("cache")
 OUT = Path("nln_xg.csv")
+SEASON_LIMIT = 3             # xG coverage only exists for the newest 3 seasons
 
-SESSION = CurlSession(impersonate="chrome")
+SESSION = CurlSession(impersonate="safari260")
 SESSION.headers.update({
-    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                   "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": "*/*",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Origin": "https://www.sofascore.com",
     "Referer": "https://www.sofascore.com/",
-    "Accept": "application/json",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
 })
 
 
 def get(path, ttl_days=None):
-    """GET with on-disk cache, jittered rate limit, and 429 backoff."""
+    """GET with on-disk cache, jittered rate limit, and 429/403 backoff.
+
+    ttl_days=None  -> cache forever (finished-match data never changes)
+    ttl_days=0     -> always refetch (fixture lists, which do change)
+    """
     key = CACHE / (path.strip("/").replace("/", "_") + ".json")
     key.parent.mkdir(parents=True, exist_ok=True)
     if key.exists():
@@ -56,6 +68,10 @@ def get(path, ttl_days=None):
             return None
         if r.status_code in (429, 403):
             print(f"  {r.status_code} — backing off {wait}s", file=sys.stderr)
+            if attempt == 0 and r.status_code == 403:
+                print("  (403 on the first try usually means the impersonation "
+                      "target is stale — see the note at the top of this file)",
+                      file=sys.stderr)
             time.sleep(wait)
             wait *= 2
             continue
@@ -74,7 +90,8 @@ def finished_events(season_id):
     """Page backwards through completed fixtures. 30 per page."""
     page, out = 0, []
     while True:
-        d = get(f"unique-tournament/{TOURNAMENT_ID}/season/{season_id}/events/last/{page}")
+        d = get(f"unique-tournament/{TOURNAMENT_ID}/season/{season_id}"
+                f"/events/last/{page}")
         if not d or not d.get("events"):
             break
         for e in d["events"]:
@@ -108,8 +125,9 @@ def shotmap(event_id):
 
 
 def cmd_check():
-    sid, year = seasons()[0]
-    print(f"Sampling most recent season: {year} (id {sid})")
+    idx = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    sid, year = seasons()[idx]
+    print(f"Sampling season: {year} (id {sid})")
     evs = finished_events(sid)[:15]
     print(f"{len(evs)} finished matches sampled\n")
 
@@ -126,15 +144,12 @@ def cmd_check():
     print(f"\nexpectedGoals present: {have_xg}/{len(evs)}")
     print(f"non-empty shotmap:     {have_shots}/{len(evs)}")
     if have_xg == 0:
-        print("\n-> No Sofascore xG at this level. Do not backfill.")
-    elif have_shots > 0:
-        print("\n-> Shot coordinates available. You can fit your own xG model,")
-        print("   which is the version actually worth testing.")
+        print("\n-> No Sofascore xG for this season. Do not backfill it.")
 
 
 def cmd_backfill():
     rows = []
-    for sid, year in seasons()[:3]:
+    for sid, year in seasons()[:SEASON_LIMIT]:
         evs = finished_events(sid)
         print(f"{year}: {len(evs)} matches", file=sys.stderr)
         for i, e in enumerate(evs, 1):
@@ -172,10 +187,12 @@ def cmd_backfill():
 
 
 def cmd_shots():
-    """Dump shot-level rows (xg, xgot, coordinates) for all cached events."""
+    """Shot-level rows: xg, xgot, coordinates, situation, body part."""
     rows = []
-    for sid, _ in seasons():
-        for e in finished_events(sid):
+    for sid, year in seasons()[:SEASON_LIMIT]:
+        evs = finished_events(sid)
+        print(f"{year}: {len(evs)} matches", file=sys.stderr)
+        for i, e in enumerate(evs, 1):
             for s in shotmap(e["id"]):
                 pc = s.get("playerCoordinates", {})
                 rows.append({
@@ -189,9 +206,12 @@ def cmd_shots():
                     "x": pc.get("x"), "y": pc.get("y"),
                     "xg": s.get("xg"), "xgot": s.get("xgot"),
                 })
+            if i % 50 == 0:
+                print(f"  {i}/{len(evs)}  ({len(rows)} shots)", file=sys.stderr)
+
     import pandas as pd
     pd.DataFrame(rows).to_csv("nln_shots.csv", index=False)
-    print(f"wrote nln_shots.csv — {len(rows)} shots")
+    print(f"\nwrote nln_shots.csv — {len(rows)} shots")
 
 
 if __name__ == "__main__":
